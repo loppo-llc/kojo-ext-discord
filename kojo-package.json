@@ -1,7 +1,7 @@
 {
   "id": "discord",
   "name": "Discord",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Connect a kojo agent to Discord: it answers mentions, replies, threads and DMs, and can post on its own.",
   "kojoVersion": ">0.135.0",
   "scopes": ["chat:session"],

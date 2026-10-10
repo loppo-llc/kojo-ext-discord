@@ -8,6 +8,8 @@ An extension package that connects a [kojo](https://github.com/loppo-llc/kojo) a
 - In a **thread** the bot has already spoken in, the conversation continues without mentions
 - It can answer **DMs** (off by default)
 - **Attachments** on a message are handed to the agent
+- **Reactions** (emoji) on the bot's messages are passed to the agent too
+- Messages and reactions that pile up within a moment reach the agent **together, as one turn**
 - The agent can also **post on its own** (send files, react, create threads, read history)
 - Each Discord channel / thread is its own session, separate from the chat in the kojo UI
 
@@ -129,9 +131,11 @@ The token is stored encrypted in kojo's credential store and never appears again
 | Answer mentions and replies | on | Answer mentions / replies to the bot in server channels |
 | Keep answering in threads | on | In a thread the bot has spoken in, answer without a mention. Needs the Message Content Intent |
 | Answer in a new thread | off | When mentioned, create a thread on that message and answer there. Each thread is a separate conversation. When off, the bot replies in the channel and the whole channel is one conversation |
+| Notify the agent of reactions | on | Tell the agent when someone adds an emoji reaction to one of the bot's messages. The agent decides whether an answer is called for. Notifications cost agent turns (ones that pile up share a turn; while the agent is working they go into the running turn) |
 | Answer direct messages | off | Answer DMs. **Read the warning below** |
 | Use the Message Content intent | off | Use the Message Content Intent. Enable it in the Developer Portal too (1-4) |
 | Channel history as context | 20 | How many earlier channel messages to give the agent when a conversation starts (0–100, 0 disables) |
+| Batch window (seconds) | 2 | Messages / reactions that arrive in the same conversation within this many seconds of the first one are handed to the agent together (0–30). 0 hands each over as soon as it arrives |
 | Allowed users | empty | User IDs to answer (comma-separated). Empty means everyone. A list holding nothing that reads as an ID answers nobody (the same goes for the other allowlists) |
 | Allowed servers | empty | Server IDs to answer in (comma-separated). Empty means every server the bot is in |
 | Allowed channels | empty | Channel IDs to answer in (comma-separated). Threads follow their parent channel. Empty means every channel the bot can see |
@@ -147,7 +151,9 @@ Anyone who talks to the bot on Discord **can give instructions to that agent** �
 ## Usage
 
 - **Talk to it**: write `@botname hello` in a channel. Replying to one of the bot's messages works too
-- **Add to a running turn**: write again in the same conversation while the agent is working and the message is handed to the running turn as a follow-up instruction (marked 👀). Backends that do not support this queue it instead
+- **React**: put an emoji on one of the bot's messages and the agent is told who reacted to which message with what. The bot stays silent when no answer is needed. Reactions to other people's messages and removed reactions are not passed on. In a DM they are passed on only while **Answer direct messages** is on
+- **Add to a running turn**: write again in the same conversation while the agent is working and the message is handed to the running turn as a follow-up instruction (marked 👀). Backends that do not support this queue it instead, and everything queued becomes the next single turn
+- **Things that arrive together**: messages and reactions that come in quick succession in one conversation are collected for the **Batch window** and handed over in one go. They get a single answer, posted as a reply to the newest message. At most 10 attachments across the batch reach the agent. A conversation holds at most 20 of them; messages beyond that are marked ⏳ and dropped
 - **Stop**: write `@botname !stop` while it is working (just `!stop` in a DM or a followed thread). It is marked 🛑 and stops
 - **Conversation scope**: one session per channel (or thread, or DM). It does not remember conversations from other channels, though the agent's own memory files are shared
 - **Sometimes it stays silent**: when the agent decides no answer is needed, nothing is posted
@@ -160,12 +166,12 @@ An agent with this extension enabled gains these tools from the MCP server `disc
 | --- | --- |
 | `list_servers` | List the servers the bot is in |
 | `list_channels` | List a server's text channels and active threads |
-| `read_messages` | Read recent messages in a channel / thread |
+| `read_messages` | Read recent messages in a channel / thread (with the reactions on them and their counts) |
 | `send_message` | Post a message. Can reply to a message and attach files (up to 10, 25 MB each) |
 | `add_reaction` | React to a message |
 | `create_thread` | Create a thread |
 
-The tools obey **Allowed servers / Allowed channels** too. When **Allowed users** is set, `read_messages` and the history passed at the start of a conversation contain only messages from those users and the bot itself, and DMs can be read or sent only with those users. `create_thread` works in text and announcement channels only.
+The tools obey **Allowed servers / Allowed channels** too. When **Allowed users** is set, reaction notifications come only from those users, `read_messages` and the history passed at the start of a conversation contain only messages from those users and the bot itself, and DMs can be read or sent only with those users. `create_thread` works in text and announcement channels only.
 
 ## Troubleshooting
 

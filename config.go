@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"strings"
+	"time"
 )
 
 // Config is the per-agent settings object kojo hands over in
@@ -15,7 +17,9 @@ type Config struct {
 	RespondInThreads     bool
 	ReplyInThread        bool
 	MessageContentIntent bool
+	RespondToReactions   bool
 	HistoryLimit         int
+	BatchWindow          time.Duration
 	AllowedGuilds        idSet
 	AllowedChannels      idSet
 	AllowedUsers         idSet
@@ -87,6 +91,8 @@ func isSnowflake(s string) bool {
 const (
 	defaultHistoryLimit = 20
 	maxHistoryLimit     = 100
+	defaultBatchSeconds = 2
+	maxBatchSeconds     = 30
 )
 
 func parseConfig(raw string) Config {
@@ -110,6 +116,7 @@ func parseConfig(raw string) Config {
 		RespondInThreads:     boolOr("respondInThreads", true),
 		ReplyInThread:        boolOr("replyInThread", false),
 		MessageContentIntent: boolOr("messageContentIntent", false),
+		RespondToReactions:   boolOr("respondToReactions", true),
 		HistoryLimit:         defaultHistoryLimit,
 		AllowedGuilds:        parseIDSet(m["allowedGuildIds"]),
 		AllowedChannels:      parseIDSet(m["allowedChannelIds"]),
@@ -124,6 +131,12 @@ func parseConfig(raw string) Config {
 	if cfg.HistoryLimit > maxHistoryLimit {
 		cfg.HistoryLimit = maxHistoryLimit
 	}
+	batch := float64(defaultBatchSeconds)
+	if v, ok := m["batchWindowSeconds"].(float64); ok {
+		batch = v
+	}
+	batch = math.Max(0, math.Min(batch, maxBatchSeconds))
+	cfg.BatchWindow = time.Duration(batch * float64(time.Second))
 	if unreadable {
 		// Settings that cannot be read may have held allowlists. Answer
 		// nobody rather than everybody.

@@ -301,6 +301,7 @@ type messageView struct {
 	Timestamp   string   `json:"timestamp,omitempty"`
 	ReplyTo     string   `json:"replyTo,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	Reactions   []string `json:"reactions,omitempty"`
 }
 
 func viewMessage(m *discordgo.Message) messageView {
@@ -317,6 +318,11 @@ func viewMessage(m *discordgo.Message) messageView {
 	for _, a := range m.Attachments {
 		if a != nil {
 			v.Attachments = append(v.Attachments, a.Filename+" "+a.URL)
+		}
+	}
+	for _, r := range m.Reactions {
+		if r != nil && r.Emoji != nil {
+			v.Reactions = append(v.Reactions, fmt.Sprintf("%s x%d", emojiLabel(r.Emoji), r.Count))
 		}
 	}
 	return v

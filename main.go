@@ -91,12 +91,17 @@ func runService(ctx context.Context, env Env, log *slog.Logger) error {
 			log.Warn("the Message Content intent is enabled in kojo but not in the Discord Developer Portal; continuing without it")
 		}
 	}
+	if cfg.RespondToReactions {
+		// Neither is privileged; nothing to enable in the Developer Portal.
+		intents |= discordgo.IntentsGuildMessageReactions | discordgo.IntentsDirectMessageReactions
+	}
 	dg.Identify.Intents = intents
 	dg.StateEnabled = true
 
 	bot := newBot(env, dg, log)
 	bot.selfID = me.ID
 	dg.AddHandler(bot.onMessageCreate)
+	dg.AddHandler(bot.onEvent)
 	dg.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		log.Info("connected to Discord", "bot", r.User.Username, "guilds", len(r.Guilds))
 	})

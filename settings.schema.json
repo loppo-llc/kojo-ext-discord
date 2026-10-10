@@ -21,6 +21,12 @@
       "description": "Once the bot has spoken in a thread, answer every message there without needing a mention. Requires the Message Content intent.",
       "default": true
     },
+    "respondToReactions": {
+      "type": "boolean",
+      "title": "Notify the agent of reactions",
+      "description": "When someone adds an emoji reaction to one of the bot's messages, tell the agent. It answers only if the reaction calls for it. Notifications cost agent turns; ones that arrive together share a turn.",
+      "default": true
+    },
     "replyInThread": {
       "type": "boolean",
       "title": "Answer in a new thread",
@@ -44,6 +50,12 @@
       "title": "Channel history as context",
       "description": "How many earlier messages of the channel are given to the agent when a conversation starts (0-100). 0 turns it off.",
       "default": 20
+    },
+    "batchWindowSeconds": {
+      "type": "integer",
+      "title": "Batch window (seconds)",
+      "description": "Messages and reactions that arrive in the same conversation within this many seconds of the first one are delivered to the agent together (0-30). 0 delivers each as soon as it arrives.",
+      "default": 2
     },
     "allowedUserIds": {
       "type": "string",

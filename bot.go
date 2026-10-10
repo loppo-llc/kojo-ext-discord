@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -22,7 +21,7 @@ const (
 	typingInterval     = 8 * time.Second
 	maxAttachments     = 10
 	maxAttachmentBytes = 25 << 20
-	maxQueuedPerChat   = 5
+	maxHeldPerChat     = 20
 	stopCommand        = "!stop"
 	busyRetries        = 5
 )
@@ -39,27 +38,14 @@ type Bot struct {
 
 	selfID string
 
-	mu       sync.Mutex
-	sessions map[string]*chatSession
+	sess *sessions
 }
 
-// chatSession serialises the turns of one conversation. kojo refuses a
-// second concurrent turn for a session key, so a message that arrives
-// mid-turn is steered into the running turn or queued behind it.
-type chatSession struct {
-	cancel context.CancelFunc
-	queue  []*incoming
-	// stopping is set by !stop until the cancelled turn has ended.
-	// Messages that arrive meanwhile queue instead of being steered
-	// into a turn that is on its way out and would swallow them.
-	stopping bool
-}
-
-// incoming is a Discord message that passed the filters, with the
-// conversation it belongs to already resolved.
+// incoming is a Discord message or reaction that passed the filters,
+// with the conversation it belongs to already resolved.
 type incoming struct {
-	msg       *discordgo.Message
-	text      string
+	msg       *discordgo.Message // nil for a reaction
+	text      string             // the message, or a description of the reaction
 	channel   *discordgo.Channel // nil for a DM
 	replyTo   string             // channel the answer goes to
 	reference bool               // answer as a Discord reply to msg
@@ -67,16 +53,19 @@ type incoming struct {
 }
 
 func newBot(env Env, dg *discordgo.Session, log *slog.Logger) *Bot {
-	return &Bot{
-		env:      env,
-		cfg:      env.Config,
-		kojo:     newKojoClient(env),
-		dg:       dg,
-		log:      log,
-		threads:  newThreadStore(env.DataDir),
-		http:     &http.Client{Timeout: 2 * time.Minute},
-		sessions: map[string]*chatSession{},
+	b := &Bot{
+		env:     env,
+		cfg:     env.Config,
+		kojo:    newKojoClient(env),
+		dg:      dg,
+		log:     log,
+		threads: newThreadStore(env.DataDir),
+		http:    &http.Client{Timeout: 2 * time.Minute},
+		sess:    newSessions(env.Config.BatchWindow, maxHeldPerChat),
 	}
+	b.sess.run = b.runTurn
+	b.sess.steer = b.steerBatch
+	return b
 }
 
 func sessionKey(channelID string) string { return "ch-" + channelID }
@@ -233,104 +222,49 @@ func (b *Bot) accept(m *discordgo.Message) *incoming {
 	return in
 }
 
-// dispatch routes an accepted message: start a turn, steer the one
-// already running, or queue behind it.
+// dispatch handles !stop and files everything else under its
+// conversation.
 func (b *Bot) dispatch(in *incoming) {
 	if strings.EqualFold(in.text, stopCommand) {
-		b.mu.Lock()
-		sess := b.sessions[sessionKey(in.replyTo)]
-		if sess != nil {
-			if sess.cancel != nil {
-				sess.cancel()
-			}
-			sess.queue = nil
-			sess.stopping = true
-		}
-		b.mu.Unlock()
-		if sess != nil {
+		if b.sess.stop(sessionKey(in.replyTo)) {
 			b.react(in.msg, "🛑")
 		}
 		return
 	}
 	b.maybeStartThread(in)
-	key := sessionKey(in.replyTo)
+	b.submit(in)
+}
 
-	b.mu.Lock()
-	sess := b.sessions[key]
-	if sess == nil {
-		sess, ctx := b.newSessionLocked(key)
-		b.mu.Unlock()
-		b.runSession(ctx, key, sess, in)
-		return
+func (b *Bot) submit(in *incoming) {
+	if !b.sess.add(sessionKey(in.replyTo), in) && in.msg != nil {
+		b.react(in.msg, "⏳")
 	}
-	if sess.stopping {
-		if len(sess.queue) >= maxQueuedPerChat {
-			b.mu.Unlock()
-			b.react(in.msg, "⏳")
-			return
-		}
-		sess.queue = append(sess.queue, in)
-		b.mu.Unlock()
-		return
-	}
-	b.mu.Unlock()
+}
 
-	steerCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err := b.kojo.Steer(steerCtx, key, b.steerText(in))
+// steerBatch hands a batch to the turn already running for key, marking
+// the messages it delivered.
+func (b *Bot) steerBatch(key string, batch []*incoming) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := b.kojo.Steer(ctx, key, steerText(batch))
 	cancel()
-	if err == nil {
-		b.react(in.msg, "👀")
-		return
-	}
-	if apiErrorCode(err) == "steer_uncertain" {
+	switch code := apiErrorCode(err); {
+	case err == nil:
+	case code == "steer_uncertain":
 		// kojo could not confirm delivery but the turn may have it.
 		// Running it again as a new turn could do the work twice.
 		b.log.Warn("steer delivery unconfirmed; not resending", "err", err)
-		b.react(in.msg, "👀")
-		return
-	}
-	if code := apiErrorCode(err); code != "not_busy" && code != "steer_unsupported" {
+	case code == "not_busy" || code == "steer_unsupported":
+		return err
+	default:
 		b.log.Warn("steer failed; queueing instead", "err", err)
+		return err
 	}
-
-	b.mu.Lock()
-	if cur := b.sessions[key]; cur != nil {
-		if len(cur.queue) >= maxQueuedPerChat {
-			b.mu.Unlock()
-			b.react(in.msg, "⏳")
-			return
+	for _, in := range batch {
+		if in.msg != nil {
+			b.react(in.msg, "👀")
 		}
-		cur.queue = append(cur.queue, in)
-		b.mu.Unlock()
-		return
 	}
-	// The turn finished while the steer was in flight.
-	sess, ctx := b.newSessionLocked(key)
-	b.mu.Unlock()
-	b.runSession(ctx, key, sess, in)
-}
-
-// newSessionLocked registers a session that is already cancellable, so
-// a !stop arriving before its first turn starts still stops it.
-// Caller holds b.mu.
-func (b *Bot) newSessionLocked(key string) (*chatSession, context.Context) {
-	ctx, cancel := context.WithCancel(context.Background())
-	sess := &chatSession{cancel: cancel}
-	b.sessions[key] = sess
-	return sess, ctx
-}
-
-// steerText labels a mid-turn message with its author: in a shared
-// channel it may not be the person the turn is answering.
-func (b *Bot) steerText(in *incoming) string {
-	text := in.text
-	if n := len(in.msg.Attachments); n > 0 {
-		text += fmt.Sprintf("\n(%d attachment(s) were sent with this message; ask for them again if you need them.)", n)
-	}
-	if in.ctx.IsDM {
-		return text
-	}
-	return fmt.Sprintf("[%s (user ID %s)] %s", sanitizeName(in.ctx.UserName), in.ctx.UserID, text)
+	return nil
 }
 
 // maybeStartThread moves the conversation into a new thread on the
@@ -366,44 +300,33 @@ func (b *Bot) maybeStartThread(in *incoming) {
 	in.ctx.ChannelName = th.Name
 }
 
-// runSession runs in's turn and then whatever queued up behind it.
-func (b *Bot) runSession(ctx context.Context, key string, sess *chatSession, in *incoming) {
-	for in != nil {
-		b.runTurn(ctx, key, in)
-
-		// The next turn's cancel is installed in the same critical
-		// section that takes it off the queue, so a !stop always finds
-		// either the message still queued or a turn it can cancel.
-		b.mu.Lock()
-		sess.cancel()
-		sess.stopping = false
-		if len(sess.queue) == 0 {
-			sess.cancel = nil
-			delete(b.sessions, key)
-			in = nil
-		} else {
-			in = sess.queue[0]
-			sess.queue = sess.queue[1:]
-			ctx, sess.cancel = context.WithCancel(context.Background())
+// runTurn runs one agent turn for everything in batch and posts the
+// answer. A batch shares a session key, so it shares a channel too.
+func (b *Bot) runTurn(ctx context.Context, key string, batch []*incoming) {
+	// The answer goes out as a reply to the newest message; a batch of
+	// reactions alone has none and is answered in the channel.
+	in := batch[len(batch)-1]
+	for i := len(batch) - 1; i >= 0; i-- {
+		if batch[i].msg != nil {
+			in = batch[i]
+			break
 		}
-		b.mu.Unlock()
 	}
-}
-
-func (b *Bot) runTurn(ctx context.Context, key string, in *incoming) {
 	stopTyping := b.startTyping(ctx, in.replyTo)
 	defer stopTyping()
 
-	attachments, skipped := b.downloadAttachments(ctx, in.msg)
-	message := in.text
+	attachments, skipped := b.downloadAttachments(ctx, batch)
+	message := batchText(batch)
 	if skipped > 0 {
 		message += fmt.Sprintf("\n(%d attachment(s) could not be downloaded and are not included.)", skipped)
 	}
+	pc := in.ctx
+	pc.Batched = len(batch) > 1
 	req := ChatRequest{
 		SessionKey:        key,
 		Message:           message,
-		SystemPromptExtra: buildSystemPromptExtra(in.ctx),
-		History:           b.history(in),
+		SystemPromptExtra: buildSystemPromptExtra(pc),
+		History:           b.history(batch),
 		HistorySelfUserID: b.selfID,
 		Attachments:       attachments,
 	}
@@ -564,13 +487,22 @@ func (b *Bot) react(m *discordgo.Message, emoji string) {
 
 // history returns the messages that preceded the current one, oldest
 // first, as context for a session kojo has not seen before.
-func (b *Bot) history(in *incoming) []HistoryMessage {
+func (b *Bot) history(batch []*incoming) []HistoryMessage {
 	if b.cfg.HistoryLimit <= 0 {
 		return nil
 	}
-	msgs, err := b.dg.ChannelMessages(in.msg.ChannelID, b.cfg.HistoryLimit, in.msg.ID, "", "")
+	// Up to the oldest message of the batch; a batch of reactions alone
+	// gets the channel's latest messages.
+	in, before := batch[0], ""
+	for _, item := range batch {
+		if item.msg != nil {
+			in, before = item, item.msg.ID
+			break
+		}
+	}
+	msgs, err := b.dg.ChannelMessages(in.replyTo, b.cfg.HistoryLimit, before, "", "")
 	if err != nil {
-		b.log.Debug("history fetch failed", "channel", in.msg.ChannelID, "err", err)
+		b.log.Debug("history fetch failed", "channel", in.replyTo, "err", err)
 		return nil
 	}
 	return toHistory(b.trusted(msgs), in.ctx.ParentID)
@@ -631,19 +563,26 @@ func toHistory(msgs []*discordgo.Message, parentID string) []HistoryMessage {
 	return out
 }
 
-// downloadAttachments saves the message's files into kojo's upload
-// directory, the only place kojo accepts attachment paths from.
-func (b *Bot) downloadAttachments(ctx context.Context, m *discordgo.Message) (saved []Attachment, skipped int) {
-	if len(m.Attachments) == 0 {
+// downloadAttachments saves the files of the batch's messages into
+// kojo's upload directory, the only place kojo accepts attachment paths
+// from.
+func (b *Bot) downloadAttachments(ctx context.Context, batch []*incoming) (saved []Attachment, skipped int) {
+	var files []*discordgo.MessageAttachment
+	for _, in := range batch {
+		if in.msg != nil {
+			files = append(files, in.msg.Attachments...)
+		}
+	}
+	if len(files) == 0 {
 		return nil, 0
 	}
 	if b.env.UploadDir == "" {
-		return nil, len(m.Attachments)
+		return nil, len(files)
 	}
 	if err := os.MkdirAll(b.env.UploadDir, 0o700); err != nil {
-		return nil, len(m.Attachments)
+		return nil, len(files)
 	}
-	for _, a := range m.Attachments {
+	for _, a := range files {
 		if a == nil || len(saved) >= maxAttachments || a.Size > maxAttachmentBytes {
 			skipped++
 			continue
