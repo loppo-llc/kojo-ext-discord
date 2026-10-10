@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "description": "One Discord bot per agent. Create the bot in the Discord Developer Portal, invite it to your server, and paste its token here.",
+  "required": ["botToken"],
+  "properties": {
+    "botToken": {
+      "type": "string",
+      "format": "password",
+      "title": "Bot token",
+      "description": "Developer Portal → your application → Bot → Reset Token. Stored encrypted; never shown again."
+    },
+    "respondToMentions": {
+      "type": "boolean",
+      "title": "Answer mentions and replies",
+      "description": "Answer when someone @mentions the bot or replies to one of its messages in a server channel.",
+      "default": true
+    },
+    "respondInThreads": {
+      "type": "boolean",
+      "title": "Keep answering in threads",
+      "description": "Once the bot has spoken in a thread, answer every message there without needing a mention. Requires the Message Content intent.",
+      "default": true
+    },
+    "replyInThread": {
+      "type": "boolean",
+      "title": "Answer in a new thread",
+      "description": "When mentioned in a channel, open a thread on that message and answer there. Each thread is its own conversation. Off: answer in the channel, one conversation per channel.",
+      "default": false
+    },
+    "respondToDMs": {
+      "type": "boolean",
+      "title": "Answer direct messages",
+      "description": "Anyone who shares a server with the bot can DM it. Turn this on only together with an allowed-users list, or for a bot in servers you trust.",
+      "default": false
+    },
+    "messageContentIntent": {
+      "type": "boolean",
+      "title": "Use the Message Content intent",
+      "description": "Lets the bot read messages that do not mention it (thread follow-ups, un-pinged replies, channel history). Must also be enabled in the Developer Portal → Bot → Privileged Gateway Intents.",
+      "default": false
+    },
+    "historyLimit": {
+      "type": "integer",
+      "title": "Channel history as context",
+      "description": "How many earlier messages of the channel are given to the agent when a conversation starts (0-100). 0 turns it off.",
+      "default": 20
+    },
+    "allowedUserIds": {
+      "type": "string",
+      "title": "Allowed users",
+      "description": "Comma-separated Discord user IDs the bot answers. Empty: everyone.",
+      "multiline": true
+    },
+    "allowedGuildIds": {
+      "type": "string",
+      "title": "Allowed servers",
+      "description": "Comma-separated server (guild) IDs. Empty: every server the bot was invited to."
+    },
+    "allowedChannelIds": {
+      "type": "string",
+      "title": "Allowed channels",
+      "description": "Comma-separated channel IDs. Threads follow their parent channel. Empty: every channel the bot can see.",
+      "multiline": true
+    }
+  }
+}
