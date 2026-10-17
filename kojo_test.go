@@ -81,6 +81,51 @@ func TestKojoChatErrors(t *testing.T) {
 	}
 }
 
+// A `!stop` (cause errStoppedByUser) sends ext-chat/cancel with byUser
+// before dropping the stream; a plain cancel only drops it.
+func TestKojoChatUserStop(t *testing.T) {
+	for _, tc := range []struct {
+		cause      error
+		wantCancel bool
+	}{{errStoppedByUser, true}, {nil, false}} {
+		cancels := make(chan map[string]any, 1)
+		started := make(chan struct{}, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/ext-chat/cancel") {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				cancels <- body
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			io.WriteString(w, `{"type":"text","delta":"x"}`+"\n")
+			w.(http.Flusher).Flush()
+			started <- struct{}{}
+			<-r.Context().Done()
+		}))
+		c := newKojoClient(Env{APIBase: srv.URL, Token: "tok", AgentID: "ag_1"})
+		ctx, cancel := context.WithCancelCause(context.Background())
+		errc := make(chan error, 1)
+		go func() { errc <- c.Chat(ctx, ChatRequest{SessionKey: "k", Message: "m"}, func(ChatEvent) {}) }()
+		<-started
+		cancel(tc.cause)
+		if err := <-errc; err == nil {
+			t.Fatal("stopped turn reported success")
+		}
+		select {
+		case body := <-cancels:
+			if !tc.wantCancel || body["sessionKey"] != "k" || body["byUser"] != true {
+				t.Fatalf("cause %v: cancel body = %v", tc.cause, body)
+			}
+		default:
+			if tc.wantCancel {
+				t.Fatal("no ext-chat/cancel for a user stop")
+			}
+		}
+		srv.Close()
+	}
+}
+
 func mcpRoundTrip(t *testing.T, srv *mcpServer, lines ...string) []map[string]any {
 	t.Helper()
 	var out bytes.Buffer

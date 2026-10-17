@@ -35,10 +35,13 @@ type sessions struct {
 // while a turn runs, a timer is armed, a steer is in flight, or events
 // are held.
 type chatSession struct {
-	cancel  context.CancelFunc // non-nil while a turn runs
-	pending []*incoming        // collecting until the timer fires
-	queue   []*incoming        // waiting for the running turn to end
-	timer   *time.Timer
+	cancel context.CancelFunc // non-nil while a turn runs
+	// userStop cancels the running turn as a `!stop` (kojo is told the
+	// user stopped it).
+	userStop context.CancelFunc
+	pending  []*incoming // collecting until the timer fires
+	queue    []*incoming // waiting for the running turn to end
+	timer    *time.Timer
 	// timerGen tells a timer callback that lost the race against a stop
 	// that it is no longer the armed one.
 	timerGen int
@@ -115,7 +118,7 @@ func (s *sessions) stop(key string) bool {
 		sess.timerGen++
 	}
 	if sess.cancel != nil {
-		sess.cancel()
+		sess.userStop()
 		sess.stopping = true
 	}
 	s.releaseLocked(key, sess)
@@ -126,8 +129,9 @@ func (s *sessions) stop(key string) bool {
 // same critical section that takes the batch, so a stop always finds
 // either the events still held or a turn it can cancel.
 func (s *sessions) beginLocked(sess *chatSession) context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	sess.cancel = cancel
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sess.cancel = func() { cancel(nil) }
+	sess.userStop = func() { cancel(errStoppedByUser) }
 	return ctx
 }
 

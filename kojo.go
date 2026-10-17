@@ -132,9 +132,23 @@ const streamIdleTimeout = 75 * time.Second
 // Chat runs one turn and calls onEvent for every event until the
 // stream ends. It returns nil once a terminal event (done or error)
 // was seen; the caller reads the outcome from the events themselves.
-func (c *KojoClient) Chat(ctx context.Context, req ChatRequest, onEvent func(ChatEvent)) error {
-	ctx, cancel := context.WithCancel(ctx)
+//
+// A ctx cancelled with errStoppedByUser (a `!stop`) first tells kojo the
+// user stopped the turn (ext-chat/cancel with byUser), then drops the
+// stream; any other cancel just drops it (kojo counts that as its own stop).
+func (c *KojoClient) Chat(parent context.Context, req ChatRequest, onEvent func(ChatEvent)) error {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	defer cancel()
+	stop := context.AfterFunc(parent, func() {
+		if errors.Is(context.Cause(parent), errStoppedByUser) {
+			cctx, done := context.WithTimeout(ctx, cancelRequestTimeout)
+			// On failure the dropped stream still stops the turn.
+			_ = c.cancelTurn(cctx, req.SessionKey)
+			done()
+		}
+		cancel()
+	})
+	defer stop()
 	resp, err := c.post(ctx, c.stream, "/api/v1/agents/"+url.PathEscape(c.agentID)+"/ext-chat", req)
 	if err != nil {
 		return err
@@ -171,10 +185,33 @@ func (c *KojoClient) Chat(ctx context.Context, req ChatRequest, onEvent func(Cha
 		return err
 	}
 	if !terminal {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return errors.New("the stream ended before the turn completed")
+	}
+	return nil
+}
+
+// errStoppedByUser is the cancel cause of a turn stopped by `!stop`.
+var errStoppedByUser = errors.New("turn stopped by the user")
+
+// cancelRequestTimeout bounds the ext-chat/cancel request.
+const cancelRequestTimeout = 5 * time.Second
+
+// cancelTurn stops sessionKey's turn as an explicit stop by a person.
+func (c *KojoClient) cancelTurn(ctx context.Context, sessionKey string) error {
+	resp, err := c.post(ctx, c.short, "/api/v1/agents/"+url.PathEscape(c.agentID)+"/ext-chat/cancel",
+		map[string]any{"sessionKey": sessionKey, "byUser": true})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return decodeAPIError(resp)
 	}
 	return nil
 }
